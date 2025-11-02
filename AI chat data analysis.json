@@ -1,0 +1,281 @@
+{
+  "name": "AI Data Analysis Agent Try 2",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "initialMessages": "Hi there! 👋\nMy name is Rehema . Please upload your csv file.",
+        "options": {
+          "allowFileUploads": true,
+          "allowedFilesMimeTypes": "text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      },
+      "id": "172a6347-9e7b-4b6a-91dd-b746c6ec6e4a",
+      "name": "Chat Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -816,
+        64
+      ],
+      "webhookId": "ai-data-analysis-chat",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.chatInput }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              },
+              "id": "e3584c1b-844a-4f7f-8941-b611b3fa3e49"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1bef9e3-d57b-467d-90eb-32d8a1d36691",
+      "name": "Check for File",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enhanced Data Cleaning & Preprocessing with Outlier Detection\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  try {\n    let fileData = null;\n    let fileName = 'uploaded_file';\n    let mimeType = '';\n    \n    if (item.binary) {\n      const binaryKeys = Object.keys(item.binary);\n      if (binaryKeys.length > 0) {\n        const firstKey = binaryKeys[0];\n        fileData = item.binary[firstKey];\n        fileName = fileData.fileName || fileName;\n        mimeType = fileData.mimeType || '';\n      }\n    }\n    \n    if (!fileData && item.json.files && item.json.files.length > 0) {\n      const file = item.json.files[0];\n      fileData = file;\n      fileName = file.fileName || file.name || fileName;\n      mimeType = file.mimeType || file.type || '';\n    }\n    \n    if (!fileData) {\n      results.push({\n        json: {\n          hasFile: false,\n          chatInput: item.json.chatInput || '',\n          sessionId: item.json.sessionId || ''\n        }\n      });\n      continue;\n    }\n    \n    if (!mimeType.includes('csv') && !fileName.endsWith('.csv')) {\n      results.push({\n        json: {\n          hasFile: false,\n          error: '❌ CSV files only. Convert Excel to CSV first.',\n          fileName: fileName,\n          chatInput: item.json.chatInput || '',\n          sessionId: item.json.sessionId || ''\n        }\n      });\n      continue;\n    }\n    \n    let csvText = '';\n    if (fileData.data) {\n      const buffer = Buffer.from(fileData.data, 'base64');\n      csvText = buffer.toString('utf8');\n    } else if (typeof fileData === 'string') {\n      csvText = fileData;\n    } else {\n      throw new Error('Unable to read file');\n    }\n    \n    const lines = csvText.trim().split('\\n').filter(line => line.trim());\n    if (lines.length === 0) throw new Error('Empty CSV');\n    \n    // Clean headers\n    const rawHeaders = lines[0].split(',');\n    const headers = rawHeaders.map(h => \n      h.trim()\n        .replace(/\"/g, '')\n        .replace(/[^a-zA-Z0-9_\\s]/g, '')\n        .replace(/\\s+/g, '_')\n        .toLowerCase()\n    );\n    \n    // Parse rows with cleaning\n    const rows = [];\n    const uniqueRows = new Set();\n    const cleaningLog = {\n      emptyRows: 0,\n      duplicateRows: 0,\n      inconsistentValues: 0,\n      outliers: {}\n    };\n    \n    for (let i = 1; i < lines.length; i++) {\n      const values = lines[i].split(',');\n      if (values.length < headers.length) continue;\n      \n      const row = {};\n      let hasData = false;\n      \n      headers.forEach((header, index) => {\n        let value = values[index]?.trim().replace(/\"/g, '');\n        \n        if (!value || value === '' || value.toLowerCase() === 'null' || value.toLowerCase() === 'n/a' || value.toLowerCase() === 'na') {\n          value = null;\n        } else {\n          hasData = true;\n          \n          // Standardize text values\n          if (typeof value === 'string') {\n            const lower = value.toLowerCase();\n            // Gender standardization\n            if (lower === 'm' || lower === 'male') value = 'Male';\n            if (lower === 'f' || lower === 'female') value = 'Female';\n            // Yes/No standardization\n            if (lower === 'yes' || lower === 'y' || lower === 'true' || lower === '1') value = 'Yes';\n            if (lower === 'no' || lower === 'n' || lower === 'false' || lower === '0') value = 'No';\n          }\n          \n          // Convert to number if possible\n          const num = parseFloat(value);\n          if (!isNaN(num) && value.match(/^-?\\d+\\.?\\d*$/)) {\n            value = num;\n          }\n        }\n        \n        row[header] = value;\n      });\n      \n      if (!hasData) {\n        cleaningLog.emptyRows++;\n        continue;\n      }\n      \n      const rowKey = JSON.stringify(row);\n      if (uniqueRows.has(rowKey)) {\n        cleaningLog.duplicateRows++;\n        continue;\n      }\n      uniqueRows.add(rowKey);\n      rows.push(row);\n    }\n    \n    if (rows.length === 0) throw new Error('No valid data');\n    \n    // Statistical analysis with outlier detection\n    const stats = {};\n    const outliers = {};\n    \n    headers.forEach(header => {\n      const values = rows.map(r => r[header]).filter(v => v !== null);\n      const numericValues = values.filter(v => typeof v === 'number');\n      \n      if (numericValues.length > 0) {\n        const sorted = [...numericValues].sort((a, b) => a - b);\n        const sum = numericValues.reduce((a, b) => a + b, 0);\n        const mean = sum / numericValues.length;\n        const median = sorted[Math.floor(sorted.length / 2)];\n        \n        // Calculate quartiles for outlier detection\n        const q1Index = Math.floor(sorted.length * 0.25);\n        const q3Index = Math.floor(sorted.length * 0.75);\n        const q1 = sorted[q1Index];\n        const q3 = sorted[q3Index];\n        const iqr = q3 - q1;\n        const lowerBound = q1 - (1.5 * iqr);\n        const upperBound = q3 + (1.5 * iqr);\n        \n        // Find outliers\n        const detectedOutliers = numericValues.filter(v => v < lowerBound || v > upperBound);\n        \n        stats[header] = {\n          type: 'numeric',\n          count: numericValues.length,\n          min: sorted[0],\n          max: sorted[sorted.length - 1],\n          mean: Math.round(mean * 100) / 100,\n          median: median,\n          sum: Math.round(sum * 100) / 100,\n          q1: q1,\n          q3: q3,\n          outlierCount: detectedOutliers.length\n        };\n        \n        if (detectedOutliers.length > 0) {\n          outliers[header] = {\n            count: detectedOutliers.length,\n            values: detectedOutliers.slice(0, 10),\n            range: `${lowerBound.toFixed(2)} to ${upperBound.toFixed(2)}`\n          };\n        }\n      } else {\n        const uniqueValues = [...new Set(values)];\n        const valueCounts = {};\n        values.forEach(v => {\n          valueCounts[v] = (valueCounts[v] || 0) + 1;\n        });\n        \n        stats[header] = {\n          type: 'categorical',\n          unique: uniqueValues.length,\n          topValues: Object.entries(valueCounts)\n            .sort((a, b) => b[1] - a[1])\n            .slice(0, 5)\n            .map(([val, count]) => ({ value: val, count }))\n        };\n      }\n    });\n    \n    const summary = {\n      fileName: fileName,\n      rowCount: rows.length,\n      columnCount: headers.length,\n      columns: headers,\n      stats: stats,\n      outliers: outliers,\n      sampleData: rows.slice(0, 5),\n      fullData: rows,\n      cleaningReport: {\n        originalRows: lines.length - 1,\n        cleanedRows: rows.length,\n        emptyRowsRemoved: cleaningLog.emptyRows,\n        duplicatesRemoved: cleaningLog.duplicateRows,\n        outliersDetected: Object.keys(outliers).length,\n        columnsProcessed: headers.length\n      }\n    };\n    \n    results.push({\n      json: {\n        hasFile: true,\n        ...summary,\n        chatInput: item.json.chatInput || '',\n        sessionId: item.json.sessionId || ''\n      }\n    });\n    \n  } catch (error) {\n    results.push({\n      json: {\n        hasFile: false,\n        error: '❌ Error: ' + error.message,\n        chatInput: item.json.chatInput || '',\n        sessionId: item.json.sessionId || ''\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "319234ee-4790-46f7-a12b-74fa34a98cfb",
+      "name": "Clean & Process Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        -32
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.hasFile ? \n`FILE UPLOADED: ${$json.fileName}\n\nDATA SUMMARY:\n- Total Rows: ${$json.rowCount}\n- Columns: ${$json.columns.join(', ')}\n- Data Quality: ${$json.cleaningReport.duplicatesRemoved} duplicates removed\n\nSTATISTICAL OVERVIEW:\n${JSON.stringify($json.stats, null, 2)}\n\nSAMPLE DATA (First 5 rows):\n${JSON.stringify($json.sampleData, null, 2)}\n\nPlease provide a comprehensive analysis including:\n1. Overview of the dataset\n2. Key statistics and insights\n3. Patterns and trends identified\n4. Recommendations based on the data\n5. Create relevant visualizations (bar chart, line chart, pie chart, scatter plot)\n\nFormat the response in a clear, professional manner.`\n: $json.chatInput }}",
+        "options": {}
+      },
+      "id": "aaff0061-33c2-42a4-87a2-1fdb073130c4",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -128,
+        0
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "model": "llama-3.1-8b-instant",
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "dce8e991-17b2-4ed1-891c-a37991dad5a2",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        -144,
+        256
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "Ax41xTVM3Iwf1HKF",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Simple pass-through for chat without files\nreturn $input.all();"
+      },
+      "id": "3557a490-1fdc-462c-9349-4bc641ac4e83",
+      "name": "Pass Through",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 6
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        -16,
+        304
+      ],
+      "id": "efc59a9d-eed6-4476-b113-50b1900751e5",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://quickchart.io/chart",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"backgroundColor\": \"white\",\n  \"width\": 700,\n  \"height\": 400,\n  \"format\": \"png\",\n  \"chart\": {\n    \"type\": \"bar\",\n    \"data\": {\n      \"labels\": {{ $('Clean & Process Data').first().json.columns ? JSON.stringify($('Clean & Process Data').first().json.columns.slice(0, 5)) : '[\"Data\"]' }},\n      \"datasets\": [{\n        \"label\": \"Values\",\n        \"data\": {{ $('Clean & Process Data').first().json.columns ? '[' + $('Clean & Process Data').first().json.columns.slice(0, 5).map(col => $('Clean & Process Data').first().json.stats[col]?.mean || 0).join(',') + ']' : '[0]' }},\n        \"backgroundColor\": \"rgba(0, 212, 255, 0.6)\"\n      }]\n    },\n    \"options\": {\n      \"title\": {\n        \"display\": true,\n        \"text\": \"Data Analysis - {{ $('Clean & Process Data').first().json.fileName || 'Dataset' }}\"\n      }\n    }\n  }\n}",
+        "options": {
+          "response": {
+            "response": {}
+          },
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        80
+      ],
+      "id": "1fa62e5b-9409-4a36-91c7-5d1061f44f79",
+      "name": "HTTP Generate Charts"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine AI analysis with chart links and text visualizations\nconst aiOutput = $('AI Agent').first().json.output || 'Analysis complete';\nconst chartResponse = $input.first().json;\nconst dataInfo = $('Clean & Process Data').first().json;\n\n// Get chart URL from QuickChart\nconst chartUrl = chartResponse.url || chartResponse.short_url || null;\n\n// Create text-based visualization for top numeric columns\nlet textChart = '';\nif (dataInfo.stats && dataInfo.hasFile) {\n  textChart += '\\n\\n📊 VISUAL SUMMARY:\\n';\n  textChart += '━━━━━━━━━━━━━━━━━━━━━━━━\\n\\n';\n  \n  // Find numeric columns and create bars\n  let count = 0;\n  for (const [colName, stat] of Object.entries(dataInfo.stats)) {\n    if (stat.type === 'numeric' && count < 5) {\n      const mean = stat.mean || 0;\n      const max = stat.max || 100;\n      const percentage = Math.min((mean / max) * 100, 100);\n      const barLength = Math.floor(percentage / 5); // 20 chars max\n      const bar = '█'.repeat(barLength);\n      \n      textChart += `${colName}: ${bar} ${mean.toFixed(1)}\\n`;\n      textChart += `   (min: ${stat.min}, max: ${stat.max}, median: ${stat.median})\\n\\n`;\n      count++;\n    }\n  }\n  \n  // Add categorical distribution\n  for (const [colName, stat] of Object.entries(dataInfo.stats)) {\n    if (stat.type === 'categorical' && stat.topValues && count < 3) {\n      textChart += `\\n${colName} Distribution:\\n`;\n      stat.topValues.slice(0, 5).forEach(item => {\n        const total = dataInfo.rowCount;\n        const percentage = (item.count / total) * 100;\n        const barLength = Math.floor(percentage / 3);\n        const bar = '▓'.repeat(barLength);\n        textChart += `  ${item.value}: ${bar} ${percentage.toFixed(1)}% (${item.count})\\n`;\n      });\n      textChart += '\\n';\n      count++;\n    }\n  }\n}\n\n// Combine everything\nlet finalResponse = aiOutput;\n\n// Add text visualization\nif (textChart) {\n  finalResponse += textChart;\n}\n\n// Add chart link if available\nif (chartUrl) {\n  finalResponse += '\\n━━━━━━━━━━━━━━━━━━━━━━━━\\n';\n  finalResponse += '🔗 INTERACTIVE CHARTS:\\n\\n';\n  finalResponse += `📈 View full chart: ${chartUrl}\\n\\n`;\n  finalResponse += '💡 Click the link to view, zoom, and download high-quality charts!\\n';\n  finalResponse += '   (Right-click → Save Image to download)\\n';\n}\n\nreturn [{\n  json: {\n    output: finalResponse,\n    chartUrl: chartUrl\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        80
+      ],
+      "id": "3ed31989-ab12-4d0d-bb2b-b6b0a73bf76d",
+      "name": "Add charts in response"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Chat Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check for File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for File": {
+      "main": [
+        [
+          {
+            "node": "Clean & Process Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pass Through",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean & Process Data": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Through": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "HTTP Generate Charts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Generate Charts": {
+      "main": [
+        [
+          {
+            "node": "Add charts in response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "82cad862-fcc0-427b-ad2f-677144a4d0c7",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "57fd54d34679e2ebf61ac01f0782aae54a759edccaca9c3f931bf9bc36f81ed4"
+  },
+  "id": "Dik7UvqoMxNUbYm2",
+  "tags": []
+}
